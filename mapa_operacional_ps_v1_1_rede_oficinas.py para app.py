@@ -12,7 +12,7 @@ import streamlit as st
 
 # ============================================================
 # MAPA OPERACIONAL PS
-# Versão 1.2 — uploads guiados + validação de arquivos + rede de oficinas
+# Versão 1.4 — fontes corrigidas: SAVE CSV + Cadastro XLSX
 # ============================================================
 
 st.set_page_config(
@@ -519,23 +519,15 @@ arquivos_atividades = st.sidebar.file_uploader(
     ),
 )
 
-st.sidebar.markdown("**2) Cadastro da rede**")
-cadastro_vigente_arquivo = st.sidebar.file_uploader(
-    "CSV vigente das oficinas",
-    type=["csv"],
-    key="cadastro_vigente",
+st.sidebar.markdown("**2) Rede de oficinas**")
+arquivos_rede = st.sidebar.file_uploader(
+    "Importe o SAVE (CSV) + Cadastro da rede (XLS/XLSX)",
+    type=["csv", "xls", "xlsx"],
+    accept_multiple_files=True,
+    key="cadastro_rede_auto",
     help=(
-        "Arquivo exportado do painel com os nomes atuais das oficinas. "
-        "O app valida se existem colunas como Oficina, Cidade-base e UF-base."
-    ),
-)
-
-save_arquivo = st.sidebar.file_uploader(
-    "XLS/XLSX do SAVE",
-    type=["xls", "xlsx"],
-    key="save_oficinas",
-    help=(
-        "Planilha do SAVE com endereço e coordenadas das oficinas."
+        "Selecione juntos o CSV do SAVE com os nomes vigentes e o XLS/XLSX do cadastro da rede com endereços/coordenadas. "
+        "O app identifica automaticamente qual arquivo é qual pelas colunas internas."
     ),
 )
 
@@ -568,7 +560,7 @@ def validar_cadastro_vigente(df: pd.DataFrame) -> tuple[bool, str]:
     if obrig.issubset(colunas):
         return True, ""
     return False, (
-        "Este CSV não parece ser o cadastro vigente de oficinas. "
+        "Este CSV não parece ser o SAVE com os nomes vigentes das oficinas. "
         "Ele precisa conter Oficina, Cidade-base e UF-base."
     )
 
@@ -579,7 +571,7 @@ def validar_save(df: pd.DataFrame) -> tuple[bool, str]:
     if colunas.intersection(sinais_nome) and len(colunas.intersection(sinais_geo)) >= 3:
         return True, ""
     return False, (
-        "Esta planilha não parece ser o SAVE de oficinas. "
+        "Esta planilha não parece ser o Cadastro da rede de oficinas. "
         "Esperava encontrar nome/razão social e campos geográficos "
         "como Latitude, Longitude, CEP, Cidade e UF."
     )
@@ -614,37 +606,70 @@ if concluidos.empty:
 # ============================================================
 
 rede = pd.DataFrame()
+save_vigente = None
+cadastro_geo = None
 
-if cadastro_vigente_arquivo is not None:
-    try:
-        cadastro_teste = ler_csv_robusto(cadastro_vigente_arquivo)
-        ok, msg = validar_cadastro_vigente(cadastro_teste)
-        if not ok:
-            st.error(msg)
-            st.stop()
-    except Exception as erro:
-        st.error(f"Erro ao ler CSV vigente das oficinas: {erro}")
-        st.stop()
+if arquivos_rede:
+    erros_rede = []
 
-if save_arquivo is not None:
-    try:
-        save_teste = ler_xlsx(save_arquivo)
-        ok, msg = validar_save(save_teste)
-        if not ok:
-            st.error(msg)
-            st.stop()
-    except Exception as erro:
-        st.error(f"Erro ao ler planilha SAVE: {erro}")
-        st.stop()
+    for arquivo in arquivos_rede:
+        nome = arquivo.name.lower()
 
-if cadastro_vigente_arquivo is not None and save_arquivo is not None:
+        try:
+            if nome.endswith(".csv"):
+                df_rede = ler_csv_robusto(arquivo)
+
+                ok_save, _ = validar_cadastro_vigente(df_rede)
+                if ok_save and save_vigente is None:
+                    save_vigente = df_rede
+                    st.sidebar.success(
+                        f"✅ SAVE identificado: {arquivo.name}"
+                    )
+                else:
+                    erros_rede.append(
+                        f"{arquivo.name}: o CSV não foi identificado como SAVE vigente."
+                    )
+
+            elif nome.endswith((".xls", ".xlsx")):
+                df_rede = ler_xlsx(arquivo)
+
+                ok_cadastro, _ = validar_save(df_rede)
+                if ok_cadastro and cadastro_geo is None:
+                    cadastro_geo = df_rede
+                    st.sidebar.success(
+                        f"✅ Cadastro da rede identificado: {arquivo.name}"
+                    )
+                else:
+                    erros_rede.append(
+                        f"{arquivo.name}: a planilha não foi identificada como Cadastro da rede."
+                    )
+
+        except Exception as erro:
+            erros_rede.append(f"{arquivo.name}: {erro}")
+
+    for erro in erros_rede:
+        st.sidebar.warning(erro)
+
+if save_vigente is not None and cadastro_geo is not None:
     try:
+        # Regra de negócio:
+        # - nomes vigentes vêm do SAVE (CSV)
+        # - endereço/CEP/latitude/longitude vêm do Cadastro da rede (XLS/XLSX)
         rede = montar_rede_oficinas(
-            cadastro_teste,
-            save_teste,
+            save_vigente,
+            cadastro_geo,
         )
     except Exception as erro:
         st.error(f"Erro ao montar rede de oficinas: {erro}")
+elif arquivos_rede:
+    faltando = []
+    if save_vigente is None:
+        faltando.append("SAVE (CSV)")
+    if cadastro_geo is None:
+        faltando.append("Cadastro da rede (XLS/XLSX)")
+    st.sidebar.info(
+        "Ainda falta identificar: " + " e ".join(faltando)
+    )
 
 # ============================================================
 # FILTROS
