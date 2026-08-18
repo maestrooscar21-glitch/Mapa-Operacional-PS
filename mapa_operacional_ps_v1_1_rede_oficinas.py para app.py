@@ -12,7 +12,7 @@ import streamlit as st
 
 # ============================================================
 # MAPA OPERACIONAL PS
-# Versão 1.5 — territórios por consultor e mapa colorido
+# Versão 1.6 — territórios coloridos + atividades vermelhas + oficinas azuis
 # ============================================================
 
 st.set_page_config(
@@ -52,7 +52,7 @@ CONSULTOR_POR_UF = {
     "PA": "Fábio Silva*",
     "RO": "Fábio Silva*",
     "RR": "Fábio Silva*",
-    "TO": "Fábio Silva*",
+    "TO": "Gleci Nunes",
 
     # Nordeste
     "AL": "Oscar Barbosa",
@@ -908,23 +908,115 @@ else:
 # ============================================================
 
 st.divider()
-st.subheader("🌎 Demanda executada × territórios dos consultores")
+st.subheader("🌎 Cobertura territorial × atividades × oficinas")
 
+# Cores suaves dos territórios.
+COR_TERRITORIO = {
+    "Fábio Silva*": "#D9D9D9",       # Norte
+    "Oscar Barbosa": "#CDECCF",      # Nordeste
+    "Fábio Silva": "#CFE8FF",        # Minas Gerais
+    "Gleci Nunes": "#FFF0A8",        # Centro-Oeste + TO
+    "Marcos Bispo": "#E4D3F5",       # RS + SC
+    "Roberto Rugel": "#FFD7A8",      # Paraná
+    "Paulo Castro": "#BFE3EA",       # SP + RJ + ES
+    "Não definido": "#EEEEEE",
+}
+
+# GeoJSON público dos estados brasileiros.
+# Mantemos o desenho dos estados individualmente para preservar suas fronteiras.
+@st.cache_data(show_spinner=False)
+def carregar_geojson_estados():
+    import json
+    from urllib.request import urlopen, Request
+
+    url = (
+        "https://raw.githubusercontent.com/"
+        "codeforamerica/click_that_hood/master/public/data/brazil-states.geojson"
+    )
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=20) as resposta:
+        return json.load(resposta)
+
+try:
+    geojson_estados = carregar_geojson_estados()
+except Exception as erro:
+    geojson_estados = None
+    st.warning(
+        "Não foi possível carregar agora o desenho dos estados brasileiros. "
+        "Os pontos continuam disponíveis, mas o preenchimento territorial não será exibido."
+    )
+
+fig = go.Figure()
+
+# ------------------------------------------------------------
+# 1. TERRITÓRIOS COLORIDOS, mantendo fronteiras de cada estado
+# ------------------------------------------------------------
+if geojson_estados is not None:
+    ufs_territorio = pd.DataFrame(
+        [
+            {
+                "UF": uf,
+                "Consultor": consultor,
+                "Território": CONSULTOR_REGIAO.get(
+                    consultor, "Não definido"
+                ),
+            }
+            for uf, consultor in CONSULTOR_POR_UF.items()
+        ]
+    )
+
+    for consultor in CONSULTOR_REGIAO:
+        grupo = ufs_territorio[
+            ufs_territorio["Consultor"] == consultor
+        ].copy()
+
+        if grupo.empty:
+            continue
+
+        cor = COR_TERRITORIO.get(
+            consultor,
+            COR_TERRITORIO["Não definido"],
+        )
+
+        fig.add_trace(
+            go.Choropleth(
+                geojson=geojson_estados,
+                locations=grupo["UF"],
+                featureidkey="properties.sigla",
+                z=[1] * len(grupo),
+                colorscale=[[0, cor], [1, cor]],
+                showscale=False,
+                marker_line_color="#555555",
+                marker_line_width=1.1,
+                text=[
+                    f"<b>{uf}</b><br>"
+                    f"Consultor: {consultor}<br>"
+                    f"Território: {territorio}"
+                    for uf, territorio in zip(
+                        grupo["UF"],
+                        grupo["Território"],
+                    )
+                ],
+                hovertemplate="%{text}<extra></extra>",
+                name=f"{consultor} — {CONSULTOR_REGIAO[consultor]}",
+                showlegend=True,
+            )
+        )
+
+# ------------------------------------------------------------
+# 2. ATIVIDADES / CLIENTES = VERMELHO
+# Nesta versão, enquanto não houver geocodificação individual
+# do cliente, o volume é posicionado no centro da UF.
+# ------------------------------------------------------------
 por_uf = (
     filtrada[
         filtrada["UF"].isin(CENTRO_UF)
     ]
-    .groupby(
-        ["UF", "Consultor territorial", "Região consultor"],
-        dropna=False,
-    )
+    .groupby("UF")
     .size()
     .reset_index(name="Executados")
 )
 
-fig = go.Figure()
-
-# Uma camada por consultor para a demanda executada.
 if not por_uf.empty:
     por_uf["Latitude"] = por_uf["UF"].map(
         lambda uf: CENTRO_UF[uf][0]
@@ -933,50 +1025,41 @@ if not por_uf.empty:
         lambda uf: CENTRO_UF[uf][1]
     )
 
-    for consultor in CONSULTOR_REGIAO:
-        grupo = por_uf[
-            por_uf["Consultor territorial"] == consultor
-        ].copy()
+    max_exec = max(por_uf["Executados"].max(), 1)
 
-        if grupo.empty:
-            continue
-
-        fig.add_trace(
-            go.Scattergeo(
-                lat=grupo["Latitude"],
-                lon=grupo["Longitude"],
-                text=[
-                    f"<b>{uf}</b><br>"
-                    f"Consultor: {consultor}<br>"
-                    f"Território: {regiao}<br>"
-                    f"Serviços executados: {qtd}"
-                    for uf, regiao, qtd in zip(
-                        grupo["UF"],
-                        grupo["Região consultor"],
-                        grupo["Executados"],
-                    )
-                ],
-                hoverinfo="text",
-                mode="markers",
-                marker=dict(
-                    size=(
-                        12
-                        + grupo["Executados"]
-                        / max(por_uf["Executados"].max(), 1)
-                        * 48
-                    ),
-                    color=COR_CONSULTOR.get(
-                        consultor,
-                        COR_CONSULTOR["Não definido"],
-                    ),
-                    opacity=0.50,
-                    line=dict(width=1),
+    fig.add_trace(
+        go.Scattergeo(
+            lat=por_uf["Latitude"],
+            lon=por_uf["Longitude"],
+            text=[
+                f"<b>{uf}</b><br>"
+                f"Atividades executadas: {qtd}"
+                for uf, qtd in zip(
+                    por_uf["UF"],
+                    por_uf["Executados"],
+                )
+            ],
+            hoverinfo="text",
+            mode="markers",
+            marker=dict(
+                size=(
+                    10
+                    + por_uf["Executados"] / max_exec * 38
                 ),
-                name=f"{consultor} — {CONSULTOR_REGIAO[consultor]}",
-            )
+                color="#E53935",
+                opacity=0.72,
+                line=dict(
+                    width=1.2,
+                    color="white",
+                ),
+            ),
+            name="Atividades / clientes",
         )
+    )
 
-# Oficinas: mesma cor do consultor responsável.
+# ------------------------------------------------------------
+# 3. OFICINAS = LOSANGO AZUL, maiores e padronizadas
+# ------------------------------------------------------------
 if not rede.empty:
     oficinas_mapa = rede[
         rede["Latitude"].notna()
@@ -996,68 +1079,60 @@ if not rede.empty:
             oficinas_mapa["Oficina vigente"].isin(oficinas)
         ]
 
-    for consultor in CONSULTOR_REGIAO:
-        grupo = oficinas_mapa[
-            oficinas_mapa["Consultor"] == consultor
-        ].copy()
-
-        if grupo.empty:
-            continue
-
+    if not oficinas_mapa.empty:
         fig.add_trace(
             go.Scattergeo(
-                lat=grupo["Latitude"],
-                lon=grupo["Longitude"],
+                lat=oficinas_mapa["Latitude"],
+                lon=oficinas_mapa["Longitude"],
                 text=[
                     f"<b>{nome}</b><br>"
                     f"Consultor: {consultor}<br>"
-                    f"Território: {regiao}<br>"
                     f"{cidade}/{uf}<br>"
                     f"{rua}, {numero}<br>"
                     f"Fonte: {fonte}"
-                    for nome, regiao, cidade, uf, rua, numero, fonte in zip(
-                        grupo["Oficina vigente"],
-                        grupo["Região consultor"],
-                        grupo["Cidade-base"],
-                        grupo["UF-base"],
-                        grupo["Rua"],
-                        grupo["Número"],
-                        grupo["Fonte localização"],
+                    for nome, consultor, cidade, uf, rua, numero, fonte in zip(
+                        oficinas_mapa["Oficina vigente"],
+                        oficinas_mapa["Consultor"],
+                        oficinas_mapa["Cidade-base"],
+                        oficinas_mapa["UF-base"],
+                        oficinas_mapa["Rua"],
+                        oficinas_mapa["Número"],
+                        oficinas_mapa["Fonte localização"],
                     )
                 ],
                 hoverinfo="text",
                 mode="markers",
                 marker=dict(
-                    size=9,
+                    size=12,
                     symbol="diamond",
-                    color=COR_CONSULTOR.get(
-                        consultor,
-                        COR_CONSULTOR["Não definido"],
-                    ),
+                    color="#1565C0",
+                    opacity=0.95,
                     line=dict(
                         width=1.5,
                         color="white",
                     ),
                 ),
-                name=f"Oficinas — {consultor}",
-                legendgroup=consultor,
-                showlegend=False,
+                name="Oficinas",
             )
         )
 
 fig.update_geos(
     scope="south america",
-    projection_type="natural earth",
-    lataxis_range=[-35, 6],
-    lonaxis_range=[-75, -32],
-    showcountries=True,
-    showcoastlines=True,
+    fitbounds="locations",
+    visible=False,
+    projection_type="mercator",
+    showcountries=False,
+    showcoastlines=False,
     showland=True,
+    landcolor="#FAFAFA",
+    bgcolor="white",
 )
 
 fig.update_layout(
-    height=700,
+    height=760,
     margin=dict(l=0, r=0, t=10, b=0),
+    paper_bgcolor="white",
+    plot_bgcolor="white",
     legend=dict(
         orientation="h",
         yanchor="bottom",
@@ -1073,8 +1148,9 @@ st.plotly_chart(
 )
 
 st.caption(
-    "Cada cor representa o território de um consultor. "
-    "Círculos mostram o volume executado por UF; losangos mostram as oficinas."
+    "Territórios = cores suaves por consultor, preservando as fronteiras dos estados. "
+    "Vermelho = atividades/clientes. Azul em losango = oficinas. "
+    "Na próxima etapa, os clientes serão posicionados pelo endereço/CEP individual."
 )
 
 # Resumo executivo por consultor.
