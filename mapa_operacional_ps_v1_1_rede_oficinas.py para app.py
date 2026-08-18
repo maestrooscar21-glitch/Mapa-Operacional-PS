@@ -12,7 +12,7 @@ import streamlit as st
 
 # ============================================================
 # MAPA OPERACIONAL PS
-# Versão 1.4 — fontes corrigidas: SAVE CSV + Cadastro XLSX
+# Versão 1.5 — territórios por consultor e mapa colorido
 # ============================================================
 
 st.set_page_config(
@@ -31,6 +31,70 @@ st.caption(
 # ============================================================
 # CONSTANTES
 # ============================================================
+
+
+# Divisão territorial usada no Operações de Campo PS.
+CONSULTOR_REGIAO = {
+    "Oscar Barbosa": "Nordeste",
+    "Paulo Castro": "Sudeste",
+    "Fábio Silva": "Minas Gerais",
+    "Fábio Silva*": "Norte",
+    "Marcos Bispo": "Rio Grande do Sul / Santa Catarina",
+    "Roberto Rugel": "Paraná",
+    "Gleci Nunes": "Centro-Oeste",
+}
+
+CONSULTOR_POR_UF = {
+    # Norte
+    "AC": "Fábio Silva*",
+    "AP": "Fábio Silva*",
+    "AM": "Fábio Silva*",
+    "PA": "Fábio Silva*",
+    "RO": "Fábio Silva*",
+    "RR": "Fábio Silva*",
+    "TO": "Fábio Silva*",
+
+    # Nordeste
+    "AL": "Oscar Barbosa",
+    "BA": "Oscar Barbosa",
+    "CE": "Oscar Barbosa",
+    "MA": "Oscar Barbosa",
+    "PB": "Oscar Barbosa",
+    "PE": "Oscar Barbosa",
+    "PI": "Oscar Barbosa",
+    "RN": "Oscar Barbosa",
+    "SE": "Oscar Barbosa",
+
+    # Centro-Oeste
+    "DF": "Gleci Nunes",
+    "GO": "Gleci Nunes",
+    "MT": "Gleci Nunes",
+    "MS": "Gleci Nunes",
+
+    # Minas Gerais
+    "MG": "Fábio Silva",
+
+    # Sudeste sem MG
+    "SP": "Paulo Castro",
+    "RJ": "Paulo Castro",
+    "ES": "Paulo Castro",
+
+    # Sul dividido
+    "PR": "Roberto Rugel",
+    "RS": "Marcos Bispo",
+    "SC": "Marcos Bispo",
+}
+
+COR_CONSULTOR = {
+    "Oscar Barbosa": "#F59E0B",
+    "Paulo Castro": "#2563EB",
+    "Fábio Silva": "#7C3AED",
+    "Fábio Silva*": "#10B981",
+    "Marcos Bispo": "#DC2626",
+    "Roberto Rugel": "#14B8A6",
+    "Gleci Nunes": "#EC4899",
+    "Não definido": "#6B7280",
+}
 
 REGIAO_POR_UF = {
     "AC": "Norte", "AP": "Norte", "AM": "Norte", "PA": "Norte",
@@ -198,6 +262,12 @@ def padronizar_atividade(df: pd.DataFrame, nome_arquivo: str) -> pd.DataFrame:
 
     out["UF"] = out["Estado"].astype(str).str.strip().str.upper()
     out["Região"] = out["UF"].map(REGIAO_POR_UF).fillna("Sem região")
+    out["Consultor territorial"] = out["UF"].map(
+        CONSULTOR_POR_UF
+    ).fillna("Não definido")
+    out["Região consultor"] = out["Consultor territorial"].map(
+        CONSULTOR_REGIAO
+    ).fillna("Não definida")
     out["Chave Oficina"] = out["Oficina"].apply(normalizar_texto)
 
     out["__chave"] = out["OS"].astype(str).str.strip()
@@ -289,6 +359,22 @@ def preparar_cadastro_vigente(df: pd.DataFrame) -> pd.DataFrame:
     base["Chave Oficina"] = base["Oficina vigente"].apply(normalizar_texto)
     base["Cidade-base"] = base["Cidade-base"].astype(str).str.strip()
     base["UF-base"] = base["UF-base"].astype(str).str.strip().str.upper()
+
+    # Se o SAVE/CSV vigente já trouxer Consultor, preserva-o.
+    # Caso contrário, deriva pela divisão territorial por UF.
+    if "Consultor" in base.columns:
+        base["Consultor"] = base["Consultor"].astype(str).str.strip()
+        base["Consultor"] = base["Consultor"].replace("", pd.NA)
+    else:
+        base["Consultor"] = pd.NA
+
+    base["Consultor"] = base["Consultor"].fillna(
+        base["UF-base"].map(CONSULTOR_POR_UF)
+    ).fillna("Não definido")
+
+    base["Região consultor"] = base["Consultor"].map(
+        CONSULTOR_REGIAO
+    ).fillna("Não definida")
 
     # Regras de descarte manual.
     base = base[
@@ -692,6 +778,18 @@ else:
         max_value=data_max,
     )
 
+consultores_territorio = st.sidebar.multiselect(
+    "Consultor / território",
+    list(CONSULTOR_REGIAO.keys()),
+)
+
+if consultores_territorio:
+    concluidos = concluidos[
+        concluidos["Consultor territorial"].isin(
+            consultores_territorio
+        )
+    ].copy()
+
 regioes = st.sidebar.multiselect(
     "Região",
     sorted(
@@ -810,19 +908,23 @@ else:
 # ============================================================
 
 st.divider()
-st.subheader("🌎 Demanda executada × rede de oficinas")
+st.subheader("🌎 Demanda executada × territórios dos consultores")
 
 por_uf = (
     filtrada[
         filtrada["UF"].isin(CENTRO_UF)
     ]
-    .groupby(["UF", "Região"])
+    .groupby(
+        ["UF", "Consultor territorial", "Região consultor"],
+        dropna=False,
+    )
     .size()
     .reset_index(name="Executados")
 )
 
 fig = go.Figure()
 
+# Uma camada por consultor para a demanda executada.
 if not por_uf.empty:
     por_uf["Latitude"] = por_uf["UF"].map(
         lambda uf: CENTRO_UF[uf][0]
@@ -831,36 +933,50 @@ if not por_uf.empty:
         lambda uf: CENTRO_UF[uf][1]
     )
 
-    fig.add_trace(
-        go.Scattergeo(
-            lat=por_uf["Latitude"],
-            lon=por_uf["Longitude"],
-            text=[
-                f"<b>{uf}</b><br>"
-                f"Região: {regiao}<br>"
-                f"Serviços executados: {qtd}"
-                for uf, regiao, qtd in zip(
-                    por_uf["UF"],
-                    por_uf["Região"],
-                    por_uf["Executados"],
-                )
-            ],
-            hoverinfo="text",
-            mode="markers+text",
-            textposition="middle center",
-            marker=dict(
-                size=(
-                    10
-                    + por_uf["Executados"]
-                    / max(por_uf["Executados"].max(), 1)
-                    * 45
-                ),
-                opacity=0.55,
-            ),
-            name="Demanda executada por UF",
-        )
-    )
+    for consultor in CONSULTOR_REGIAO:
+        grupo = por_uf[
+            por_uf["Consultor territorial"] == consultor
+        ].copy()
 
+        if grupo.empty:
+            continue
+
+        fig.add_trace(
+            go.Scattergeo(
+                lat=grupo["Latitude"],
+                lon=grupo["Longitude"],
+                text=[
+                    f"<b>{uf}</b><br>"
+                    f"Consultor: {consultor}<br>"
+                    f"Território: {regiao}<br>"
+                    f"Serviços executados: {qtd}"
+                    for uf, regiao, qtd in zip(
+                        grupo["UF"],
+                        grupo["Região consultor"],
+                        grupo["Executados"],
+                    )
+                ],
+                hoverinfo="text",
+                mode="markers",
+                marker=dict(
+                    size=(
+                        12
+                        + grupo["Executados"]
+                        / max(por_uf["Executados"].max(), 1)
+                        * 48
+                    ),
+                    color=COR_CONSULTOR.get(
+                        consultor,
+                        COR_CONSULTOR["Não definido"],
+                    ),
+                    opacity=0.50,
+                    line=dict(width=1),
+                ),
+                name=f"{consultor} — {CONSULTOR_REGIAO[consultor]}",
+            )
+        )
+
+# Oficinas: mesma cor do consultor responsável.
 if not rede.empty:
     oficinas_mapa = rede[
         rede["Latitude"].notna()
@@ -880,23 +996,33 @@ if not rede.empty:
             oficinas_mapa["Oficina vigente"].isin(oficinas)
         ]
 
-    if not oficinas_mapa.empty:
+    for consultor in CONSULTOR_REGIAO:
+        grupo = oficinas_mapa[
+            oficinas_mapa["Consultor"] == consultor
+        ].copy()
+
+        if grupo.empty:
+            continue
+
         fig.add_trace(
             go.Scattergeo(
-                lat=oficinas_mapa["Latitude"],
-                lon=oficinas_mapa["Longitude"],
+                lat=grupo["Latitude"],
+                lon=grupo["Longitude"],
                 text=[
                     f"<b>{nome}</b><br>"
+                    f"Consultor: {consultor}<br>"
+                    f"Território: {regiao}<br>"
                     f"{cidade}/{uf}<br>"
                     f"{rua}, {numero}<br>"
                     f"Fonte: {fonte}"
-                    for nome, cidade, uf, rua, numero, fonte in zip(
-                        oficinas_mapa["Oficina vigente"],
-                        oficinas_mapa["Cidade-base"],
-                        oficinas_mapa["UF-base"],
-                        oficinas_mapa["Rua"],
-                        oficinas_mapa["Número"],
-                        oficinas_mapa["Fonte localização"],
+                    for nome, regiao, cidade, uf, rua, numero, fonte in zip(
+                        grupo["Oficina vigente"],
+                        grupo["Região consultor"],
+                        grupo["Cidade-base"],
+                        grupo["UF-base"],
+                        grupo["Rua"],
+                        grupo["Número"],
+                        grupo["Fonte localização"],
                     )
                 ],
                 hoverinfo="text",
@@ -904,9 +1030,18 @@ if not rede.empty:
                 marker=dict(
                     size=9,
                     symbol="diamond",
-                    line=dict(width=1),
+                    color=COR_CONSULTOR.get(
+                        consultor,
+                        COR_CONSULTOR["Não definido"],
+                    ),
+                    line=dict(
+                        width=1.5,
+                        color="white",
+                    ),
                 ),
-                name="Oficinas",
+                name=f"Oficinas — {consultor}",
+                legendgroup=consultor,
+                showlegend=False,
             )
         )
 
@@ -921,7 +1056,7 @@ fig.update_geos(
 )
 
 fig.update_layout(
-    height=680,
+    height=700,
     margin=dict(l=0, r=0, t=10, b=0),
     legend=dict(
         orientation="h",
@@ -938,11 +1073,39 @@ st.plotly_chart(
 )
 
 st.caption(
-    "Círculos = volume executado por UF. "
-    "Losangos = localização real das oficinas com coordenadas disponíveis. "
-    "A próxima camada geocodifica o cliente para calcular distância oficina → atendimento."
+    "Cada cor representa o território de um consultor. "
+    "Círculos mostram o volume executado por UF; losangos mostram as oficinas."
 )
 
+# Resumo executivo por consultor.
+st.markdown("#### 👥 Execução por consultor / território")
+
+resumo_consultor = (
+    filtrada.groupby(
+        ["Consultor territorial", "Região consultor"],
+        dropna=False,
+    )
+    .size()
+    .reset_index(name="Executados")
+    .sort_values("Executados", ascending=False)
+)
+
+resumo_consultor["% do total"] = (
+    resumo_consultor["Executados"]
+    / resumo_consultor["Executados"].sum()
+    * 100
+)
+
+st.dataframe(
+    resumo_consultor.rename(
+        columns={
+            "Consultor territorial": "Consultor",
+            "Região consultor": "Território",
+        }
+    ),
+    use_container_width=True,
+    hide_index=True,
+)
 
 # ============================================================
 # DIAGNÓSTICO DA REDE
