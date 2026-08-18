@@ -12,7 +12,7 @@ import streamlit as st
 
 # ============================================================
 # MAPA OPERACIONAL PS
-# Versão 1.1 — demanda + rede de oficinas
+# Versão 1.2 — uploads guiados + validação de arquivos + rede de oficinas
 # ============================================================
 
 st.set_page_config(
@@ -88,9 +88,9 @@ OVERRIDES_OFICINAS = {
         "Cidade SAVE": "Passo Fundo",
         "UF SAVE": "RS",
         "CEP": "",
-       "Latitude": -28.259394848432738,
-"Longitude": -52.44547502883579,
-"Fonte localização": "Override manual OFS",
+        "Latitude": -28.259394848432738,
+        "Longitude": -52.44547502883579,
+        "Fonte localização": "Override manual OFS",
     },
 }
 
@@ -507,23 +507,36 @@ def aplicar_filtros(
 
 st.sidebar.header("📥 Bases")
 
+st.sidebar.markdown("**1) Atividades**")
 arquivos_atividades = st.sidebar.file_uploader(
-    "CSVs de atividades",
+    "Importe um ou vários CSVs de atividades",
     type=["csv"],
     accept_multiple_files=True,
     key="atividades",
+    help=(
+        "O app valida as colunas internas para confirmar que o arquivo "
+        "parece ser um relatório de atividades."
+    ),
 )
 
+st.sidebar.markdown("**2) Cadastro da rede**")
 cadastro_vigente_arquivo = st.sidebar.file_uploader(
-    "CSV de oficinas vigentes",
+    "CSV vigente das oficinas",
     type=["csv"],
     key="cadastro_vigente",
+    help=(
+        "Arquivo exportado do painel com os nomes atuais das oficinas. "
+        "O app valida se existem colunas como Oficina, Cidade-base e UF-base."
+    ),
 )
 
 save_arquivo = st.sidebar.file_uploader(
     "XLS/XLSX do SAVE",
     type=["xls", "xlsx"],
     key="save_oficinas",
+    help=(
+        "Planilha do SAVE com endereço e coordenadas das oficinas."
+    ),
 )
 
 st.sidebar.caption(
@@ -531,18 +544,70 @@ st.sidebar.caption(
     "O SAVE complementa endereço e coordenadas."
 )
 
+def validar_arquivo_atividades(df: pd.DataFrame) -> tuple[bool, str]:
+    colunas = {normalizar_texto(c) for c in df.columns}
+    sinais = {
+        "OS",
+        "STATUS DA ATIVIDADE",
+        "TIPO DE ATIVIDADE",
+        "OFICINA",
+        "RECURSO",
+    }
+    presentes = len(colunas.intersection(sinais))
+    if presentes >= 3:
+        return True, ""
+    return False, (
+        "O arquivo não parece ser um relatório de atividades. "
+        "Esperava encontrar colunas como OS, Status da Atividade, "
+        "Tipo de Atividade, Oficina ou Recurso."
+    )
+
+def validar_cadastro_vigente(df: pd.DataFrame) -> tuple[bool, str]:
+    colunas = {normalizar_texto(c) for c in df.columns}
+    obrig = {"OFICINA", "CIDADE-BASE", "UF-BASE"}
+    if obrig.issubset(colunas):
+        return True, ""
+    return False, (
+        "Este CSV não parece ser o cadastro vigente de oficinas. "
+        "Ele precisa conter Oficina, Cidade-base e UF-base."
+    )
+
+def validar_save(df: pd.DataFrame) -> tuple[bool, str]:
+    colunas = {normalizar_texto(c) for c in df.columns}
+    sinais_nome = {"NOME FANTASIA", "RAZAO SOCIAL"}
+    sinais_geo = {"LATITUDE", "LONGITUDE", "CEP", "CIDADE", "UF"}
+    if colunas.intersection(sinais_nome) and len(colunas.intersection(sinais_geo)) >= 3:
+        return True, ""
+    return False, (
+        "Esta planilha não parece ser o SAVE de oficinas. "
+        "Esperava encontrar nome/razão social e campos geográficos "
+        "como Latitude, Longitude, CEP, Cidade e UF."
+    )
+
 if not arquivos_atividades:
     st.info("Importe os CSVs de atividades na barra lateral.")
     st.stop()
 
+atividades_validas = []
+for arquivo in arquivos_atividades:
+    try:
+        df_teste = ler_csv_robusto(arquivo)
+        ok, msg = validar_arquivo_atividades(df_teste)
+        if not ok:
+            st.error(f"{arquivo.name}: {msg}")
+            st.stop()
+        atividades_validas.append(arquivo)
+    except Exception as erro:
+        st.error(f"Erro ao ler {arquivo.name}: {erro}")
+        st.stop()
+
 with st.spinner("Consolidando atividades..."):
-    consolidado = consolidar_atividades(arquivos_atividades)
+    consolidado = consolidar_atividades(atividades_validas)
     concluidos = somente_concluidos(consolidado)
 
 if concluidos.empty:
     st.warning("Não encontrei atividades concluídas.")
     st.stop()
-
 
 # ============================================================
 # REDE DE OFICINAS
@@ -550,20 +615,36 @@ if concluidos.empty:
 
 rede = pd.DataFrame()
 
+if cadastro_vigente_arquivo is not None:
+    try:
+        cadastro_teste = ler_csv_robusto(cadastro_vigente_arquivo)
+        ok, msg = validar_cadastro_vigente(cadastro_teste)
+        if not ok:
+            st.error(msg)
+            st.stop()
+    except Exception as erro:
+        st.error(f"Erro ao ler CSV vigente das oficinas: {erro}")
+        st.stop()
+
+if save_arquivo is not None:
+    try:
+        save_teste = ler_xlsx(save_arquivo)
+        ok, msg = validar_save(save_teste)
+        if not ok:
+            st.error(msg)
+            st.stop()
+    except Exception as erro:
+        st.error(f"Erro ao ler planilha SAVE: {erro}")
+        st.stop()
+
 if cadastro_vigente_arquivo is not None and save_arquivo is not None:
     try:
-        cadastro_vigente = ler_csv_robusto(
-            cadastro_vigente_arquivo
-        )
-        save = ler_xlsx(save_arquivo)
-
         rede = montar_rede_oficinas(
-            cadastro_vigente,
-            save,
+            cadastro_teste,
+            save_teste,
         )
     except Exception as erro:
         st.error(f"Erro ao montar rede de oficinas: {erro}")
-
 
 # ============================================================
 # FILTROS
